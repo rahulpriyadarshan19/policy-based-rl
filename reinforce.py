@@ -61,38 +61,62 @@ class Reinforce():
         states = [state]
         actions = []
         rewards = []
+        policies = []
         for i in range(self.trace_length):
             action = policy.select_action(state)
+            selected_policy = policy(state)[action]
             state, reward, terminated, truncated, _ = env.step(action)
             state = torch.tensor(state, device = device)
             actions.append(action)
             states.append(state)
             rewards.append(reward)
+            policies.append(selected_policy)
             if terminated or truncated:
                 break
             
         rewards = np.array(rewards, dtype = np.float32)
-        return states, actions, rewards
+        return states, actions, rewards, policies
 
         
-    def reinforce(self, epsilon, n_episodes):
+    def reinforce(self, epsilon, n_episodes, n_traces):
         """Function to implement REINFORCE.
         """
         env = gym.make("MountainCar-v0")
         state, _ = env.reset()
         state = torch.tensor(state, device = device)
         policy = Policy(self.n_states, self.n_actions, self.n_nodes, self.n_hidden_layers)
+        optimizer = torch.optim.Adam(policy.parameters(), lr = self.learning_rate)
+
+        average_reward_per_episode = []
         
         for episode in range(n_episodes):
-            states, actions, rewards = self.generate_trace(state, policy, env)
-            
-            
-        
-        
-        
-    
 
-    
+            losses = []
+            total_reward = []
+
+            for _ in range(n_traces):
+                states, actions, rewards, policies = self.generate_trace(state, policy, env)
+                total_reward.append(np.sum(rewards))
+
+                R = []
+
+                for k in range(len(states)):
+
+                    discounts_k = np.pow(self.discount, np.arange(len(states) - k))
+                    R_k = np.sum(discounts_k * rewards[k:])
+                    R.append(R_k)
+
+                loss = np.sum(R* np.log(policies))
+                losses.append(loss)
+
+            total_loss = -np.mean(losses)
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+
+            average_reward_per_episode.append(np.mean(total_reward))
+
+        return average_reward_per_episode    
 
 if __name__ in "__main__":
     
