@@ -9,17 +9,17 @@ device = torch.device("cpu")
 class Policy(nn.Module):
     
     def __init__(self, n_state, n_actions, n_nodes, n_hidden_layers):
-        """n_state: number of states
+        """
+        n_state: number of states
         n_actions: number of actions (output size)
         n_nodes: width of each layer
         n_hidden_layers: number of hidden layers
         """
         # Initialize the attributes from the parent class (nn.Module)
         super().__init__() 
-        self.n_actions = n_actions
 
-        # Neural network with "n_hidden_layers" hidden layers
-        # Input: 4 state paremeters. Output: Q-values for the two actions
+        # Neural network with "n_hidden_layers" hidden layers and "n_nodes" width
+        # Input: 2 state paremeters. Output: probabilities of the three actions
         self.policy = nn.Sequential(nn.Linear(n_state, n_nodes), nn.ReLU()) 
         for _ in range(n_hidden_layers):
             self.policy.append(nn.Linear(n_nodes, n_nodes))
@@ -30,101 +30,151 @@ class Policy(nn.Module):
     def forward(self, state):
         """Forward pass
         state: input state vector
+            Return:
+        policy_state: probabilities of each action for the given state
         """
-        Q_state = self.policy(state)
-        return Q_state
+        policy_state = self.policy(state)
+
+        return policy_state
 
     def select_action(self, state):
         """Selects action based on the policy.
+        state: input state vector
+            Return:
+        action: index of the selected action
         """
-        prob = torch.distributions.Categorical(probs = self.forward(state))
-        a = prob.sample()
-        return a
+        probability = torch.distributions.Categorical(probs = self.forward(state))
+        action = probability.sample()
+
+        return action
     
 class Reinforce():
     
-    def __init__(self, trace_length, discount, learning_rate, 
-                 n_nodes, n_hidden_layers, n_states, n_actions):
+    def __init__(self, trace_length, discount, 
+                 learning_rate, n_nodes, n_hidden_layers):
+        
         self.trace_length = trace_length
         self.discount = discount
         self.learning_rate = learning_rate
         self.n_nodes = n_nodes
         self.n_hidden_layers = n_hidden_layers
-        self.n_states = n_states
-        self.n_actions = n_actions
         
     def generate_trace(self, state, policy, env):
-        """state: initial state
+        """ Generate one random trace in the environment
+        state: initial state
         policy: current policy
         env: environment
+            Return:
+        states: states encountered in the trace
+        actions: actions taken in the trace
+        rewards: rewards recieved after taking an action in the trace
         """
         states = [state]
         actions = []
         rewards = []
-        policies = []
-        for i in range(self.trace_length):
-            action = policy.select_action(state)
-            selected_policy = policy(state)[action]
+
+        # done = False
+
+        # Trace ends when the goal has been reached (terminated)
+        # or when it has reached a certain length (truncated ) 
+        # This length is the min("self.trace_length", max episode length of the environment)
+        for _ in range(self.trace_length):
+        # while not done:
+            action = policy.select_action(state).item()
             state, reward, terminated, truncated, _ = env.step(action)
             state = torch.tensor(state, device = device)
-            actions.append(action)
+
             states.append(state)
+            actions.append(action)
             rewards.append(reward)
-            policies.append(selected_policy)
+
             if terminated or truncated:
                 break
-            
-        rewards = np.array(rewards, dtype = np.float32)
-        return states, actions, rewards, policies
+
+        return states, actions, rewards
 
         
-    def reinforce(self, epsilon, n_episodes, n_traces):
+    def reinforce(self, env, epsilon, n_traces):
         """Function to implement REINFORCE.
+        env: environment of the problem
+        epsilon: threshold for the convergence
+        n_traces: amount of traces considered in one policy optimization
+            Return:
+        mean_reward_per_batch: mean total reward of all traces in a batch
         """
-        env = gym.make("MountainCar-v0")
-        state, _ = env.reset()
-        state = torch.tensor(state, device = device)
-        policy = Policy(self.n_states, self.n_actions, self.n_nodes, self.n_hidden_layers)
+        n_states = env.observation_space.shape[0]
+        n_actions = env.action_space.n
+
+        policy = Policy(n_states, n_actions, self.n_nodes, self.n_hidden_layers)
         optimizer = torch.optim.Adam(policy.parameters(), lr = self.learning_rate)
 
-        average_reward_per_episode = []
+        done = False
+        mean_reward_per_batch = []
         
-        for episode in range(n_episodes):
+        while not done:
 
-            losses = []
-            total_reward = []
+            total_reward_per_trace = [] # sum of rewards for every trace in the batch
+            loss_per_trace = [] # loss of every trace in the batch, loss = gradient 
 
+            # Randomly sample "n_traces" traces and calculate their collective loss
             for _ in range(n_traces):
-                states, actions, rewards, policies = self.generate_trace(state, policy, env)
-                total_reward.append(np.sum(rewards))
 
-                R = []
+                state, _ = env.reset()
+                state = torch.tensor(state, device = device)
 
-                for k in range(len(states)):
+                states, actions, rewards = self.generate_trace(state, policy, env)
 
-                    discounts_k = np.pow(self.discount, np.arange(len(states) - k))
-                    R_k = np.sum(discounts_k * rewards[k:])
-                    R.append(R_k)
+                total_reward_per_trace.append(np.sum(rewards))
+                
+                T = len(states)
+                value_estimate = 0
+                value_estimate_per_state = np.empty(T - 1)
 
-                loss = np.sum(R* np.log(policies))
-                losses.append(loss)
+                for k in np.arange(T - 2, -1, -1):
 
-            total_loss = -np.mean(losses)
+                    value_estimate = rewards[k] + self.discount * value_estimate
+                    value_estimate_per_state[k] = value_estimate
+
+                # Convert NumPy arrays to torch Tensors to allow for vectorized operations
+                states = torch.stack(states)
+                actions = torch.LongTensor(actions)
+                value_estimate_per_state = torch.Tensor(value_estimate_per_state)
+
+                policies =  policy(states[:-1]) # pi(s)
+                selected_policies = policies.gather(dim = 1, index = actions.reshape(actions.size(dim = 0), 1)).squeeze() # pi(a|s)
+                log_policies = torch.log(selected_policies) # log(pi(a|s))
+
+                loss_per_trace.append(torch.sum(value_estimate_per_state * log_policies))
+
+            mean_reward_per_batch.append(np.mean(total_reward_per_trace))
+
+            # Convert NumPy array to torch Tensors to update the policy's parameters
+            loss_per_trace = torch.stack(loss_per_trace)
+            mean_loss_per_batch = -torch.mean(loss_per_trace)
+
             optimizer.zero_grad()
-            total_loss.backward()
+            mean_loss_per_batch.backward()
             optimizer.step()
 
-            average_reward_per_episode.append(np.mean(total_reward))
+            print(f"Mean reward: {mean_reward_per_batch[-1]}, Loss: {torch.abs(mean_loss_per_batch)}")
 
-        return average_reward_per_episode    
+            # Check for convergence
+            if torch.abs(mean_loss_per_batch) < epsilon:
+                done = True
+
+        return mean_reward_per_batch    
 
 if __name__ in "__main__":
     
     # Making the environment
-    env = gym.make("MountainCar-v0")
-    state = torch.tensor(np.array([0.1, 0.9], dtype = np.float32), device = device) 
-    policy = Policy(n_state = 2, n_actions = 3, n_nodes = 32, n_hidden_layers = 4)
-    print(policy.select_action(state))
-    
-    
-    
+    env = gym.make("Acrobot-v1")
+    reinforce_init = Reinforce(trace_length = 500, discount = 0.99, 
+                               learning_rate = 0.01, n_nodes = 32, n_hidden_layers = 1) 
+    mean_reward_per_batch = reinforce_init.reinforce(env, epsilon = 0.1, n_traces = 12)
+    env.close()
+
+    plt.plot(np.arange(len(mean_reward_per_batch)), mean_reward_per_batch)
+    plt.show()
+
+ 
+
