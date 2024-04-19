@@ -4,7 +4,10 @@ import matplotlib.pyplot as plt
 import torch
 from torch import nn
 import gymnasium as gym
+from tqdm import tqdm
 device = torch.device("cpu")
+
+plt.rcParams["text.usetex"] = True
 
 class Policy(nn.Module):
     
@@ -144,7 +147,7 @@ class Reinforce():
                 selected_policies = policies.gather(dim = 1, index = actions.reshape(actions.size(dim = 0), 1)).squeeze() # pi(a|s)
                 log_policies = torch.log(selected_policies) # log(pi(a|s))
 
-                loss_per_trace.append(torch.sum(value_estimate_per_state * log_policies))
+                loss_per_trace.append(torch.sum(value_estimate_per_state * log_policies + self.learning_rate*(torch.sum(-selected_policies*log_policies))))
 
             mean_reward_per_batch.append(np.mean(total_reward_per_trace))
 
@@ -166,15 +169,29 @@ class Reinforce():
 
 if __name__ in "__main__":
     
-    # Making the environment
-    env = gym.make("Acrobot-v1")
-    reinforce_init = Reinforce(trace_length = 500, discount = 0.99, 
-                               learning_rate = 0.01, n_nodes = 32, n_hidden_layers = 1) 
-    mean_reward_per_batch = reinforce_init.reinforce(env, epsilon = 0.1, n_traces = 12)
-    env.close()
+    mean_rewards_per_batch = [] # Averaging mean reward over many runs
+    lengths = []    # Length of each run
+    
+    # Averaging over 20 runs
+    for i in tqdm(range(20)):
+    
+        # Making the environment
+        env = gym.make("Acrobot-v1")
+        reinforce_init = Reinforce(trace_length = 500, discount = 0.99, 
+                                learning_rate = 0.05, n_nodes = 32, n_hidden_layers = 1) 
+        mean_reward_per_batch = np.array(reinforce_init.reinforce(env, epsilon = 0.1, n_traces = 12))
+        mean_rewards_per_batch.append(mean_reward_per_batch)
+        lengths.append(len(mean_reward_per_batch))
+        env.close()
 
-    plt.plot(np.arange(len(mean_reward_per_batch)), mean_reward_per_batch)
+    # Taking the shortest length of all episodes because each episode is of different length
+    shortest_length = int(np.min(np.array(lengths, dtype = np.float32)))
+    mean_rewards_per_batch = np.array([mean_reward[:shortest_length] for mean_reward in mean_rewards_per_batch], dtype = np.float32)
+    mean_rewards_per_batch = np.mean(mean_rewards_per_batch, axis = 0)
+    plt.plot(np.arange(shortest_length), mean_rewards_per_batch)
+    plt.xlabel("Shortest length of episode")
+    plt.ylabel("Mean reward per episode averaged over 20 runs")
     plt.show()
-
+        
  
 
