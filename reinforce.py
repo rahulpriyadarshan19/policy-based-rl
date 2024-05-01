@@ -7,14 +7,14 @@ import gymnasium as gym
 from tqdm import tqdm
 device = torch.device("cpu")
 
-plt.rcParams["text.usetex"] = True
+# plt.rcParams["text.usetex"] = True
 
 class NeuralNetwork(nn.Module):
     """
     General neural network. Used for both the policy and the value function.
     """
     
-    def __init__(self, n_state, n_actions, n_nodes, n_hidden_layers, last_layer):
+    def __init__(self, n_state, n_actions, n_nodes, n_hidden_layers, last_layer = None):
         """
         n_state: number of states
         n_actions: number of actions (output size)
@@ -32,7 +32,8 @@ class NeuralNetwork(nn.Module):
             self.neural_network.append(nn.Linear(n_nodes, n_nodes))
             self.neural_network.append(nn.ReLU())
         self.neural_network.append(nn.Linear(n_nodes, n_actions))
-        self.neural_network.append(last_layer)
+        if last_layer is not None:
+            self.neural_network.append(last_layer)
 
     def forward(self, state):
         """Forward pass
@@ -49,30 +50,64 @@ class Policy(NeuralNetwork):
     def __init__(self, n_state, n_actions, n_nodes, n_hidden_layers):
         super().__init__(n_state, n_actions, n_nodes, n_hidden_layers, last_layer = nn.Softmax())
 
-    def select_action(self, state):
+    def select_action(self, state, exploration = "on"):
         """Selects action based on the policy.
         state: input state vector
+        exploration: indicates whether exploration is on or off
             Return:
         action: index of the selected action
         """
-        probability = torch.distributions.Categorical(probs = super().forward(state))
-        action = probability.sample()
+        if exploration == "on":
+            probability = torch.distributions.Categorical(probs = super().forward(state))
+            action = probability.sample()
+        elif exploration == "off":
+            probability = super().forward(state).argmax()
+            action = probability.max()
 
         return action
+    
+    def evaluate(self, eval_env, n_eval_episodes = 30, max_episode_length = 100):
+        """Evaluate the policy using an evaluation environment
+        eval_env: evaluation environment
+        n_eval_episodes: number of evaluation intervals
+        max_episode_length: maximum amount of environment steps within one episode 
+        """
+        total_rewards = []  # list to store the reward per episode
+        for idx in range(n_eval_episodes):
+
+            state, _ = eval_env.reset()
+            state = torch.tensor(state, device = device)
+            total_reward = 0
+
+            for _ in range(max_episode_length):
+
+                action = self.select_action(state, exploration = "off").item()
+                state, reward, terminated, truncated, _ = eval_env.step(action)
+                state = torch.tensor(state, device = device)
+                total_reward += reward
+
+                if terminated or truncated:
+                    break
+                
+            total_rewards.append(total_reward)
+        mean_reward = np.mean(total_rewards)
+        return mean_reward
     
 class Value_function(NeuralNetwork):
 
     def __init__(self, n_state, n_actions, n_nodes, n_hidden_layers):
-        super().__init__(n_state, n_actions, n_nodes, n_hidden_layers, last_layer = nn.Linear())
+        super().__init__(n_state, n_actions, n_nodes, n_hidden_layers)
 
 ############################################################################################################################
 
 class Policy_based_RL():
 
-    def __init__(self, env, method, trace_length, discount, n_bootstrapping,
-                 learning_rate, eta_entropy, n_nodes, n_hidden_layers):
+    def __init__(self, env, eval_env, method, trace_length, 
+                 discount, n_bootstrapping, learning_rate, 
+                 eta_entropy, n_nodes, n_hidden_layers):
         
         self.env = env
+        self.eval_env = eval_env
         self.method = method
         
         self.n_states = env.observation_space.shape[0]
@@ -84,9 +119,12 @@ class Policy_based_RL():
         self.policy = Policy(self.n_states, self.n_actions, self.n_nodes, self.n_hidden_layers)
         self.optimizer_policy = torch.optim.Adam(self.policy.parameters(), lr = self.learning_rate)
 
-        # Will be defined later if used
-        self.value_function = None 
-        self.optimizer_value_function = None
+        if method == "reinforce":
+            self.value_function = None 
+            self.optimizer_value_function = None
+        else:
+            self.value_function = Value_function(self.n_states, 1, self.n_nodes, self.n_hidden_layers)
+            self.optimizer_value_function = torch.optim.Adam(self.value_function.parameters(), lr = self.learning_rate)
 
         self.eta_entropy = eta_entropy
         self.n_bootstrapping = n_bootstrapping
@@ -137,33 +175,32 @@ class Policy_based_RL():
                 value_estimate_per_state[k] = value_estimate
 
             if self.method == "baseline_subtraction":
-                value_estimate_per_state - self.value_function(states[:-1])
+                value_estimate_per_state = value_estimate_per_state - self.value_function(states[:-1]).squeeze()
 
         elif self.method == "bootstrapping" or self.method == "bootstrapping_basline_subtraction":
             for k in range(T - 1):
 
                 discount_n = np.full(self.n_bootstrapping, self.discount) ** np.arange(self.n_bootstrapping)
                 value_estimate = np.sum(discount_n * rewards[k : k + self.n_bootstrapping]) \
-                                + (self.discount ** self.n_bootstrapping) * self.value_function(states[k + self.n_bootstrapping])
+                                + (self.discount ** self.n_bootstrapping) * self.value_function(states[k + self.n_bootstrapping]).squeeze()
                 value_estimate_per_state[k] = value_estimate
 
             if self.method == "bootstrapping_basline_subtraction":
-                value_estimate_per_state - self.value_function(states[:-1])
+                value_estimate_per_state = value_estimate_per_state - self.value_function(states[:-1]).squeeze()
 
         return value_estimate_per_state
     
-    def general_policy_based_algorithm(self, epsilon, n_traces):
+    def general_policy_based_algorithm(self, n_timesteps, n_traces, eval_interval):
         """
         epsilon: threshold for the convergence
         n_traces: amount of traces considered in one policy optimization
         """
-
-        done = False
-        mean_reward_per_batch = []
         
-        while not done:
+        eval_timesteps = []
+        eval_mean_reward = []
 
-            total_reward_per_trace = [] # sum of rewards for every trace in the batch
+        for time in range(int(n_timesteps / (n_traces  * self.trace_length))):
+
             policy_loss_per_trace = [] # loss of every trace in the batch, loss = gradient 
             value_function_loss_per_trace = [] # loss of every trace in the batch, loss = gradient 
 
@@ -174,8 +211,6 @@ class Policy_based_RL():
                 state = torch.tensor(state, device = device)
 
                 states, actions, rewards = self.generate_trace(state)
-
-                total_reward_per_trace.append(np.sum(rewards))
 
                 # Convert NumPy arrays to torch Tensors to allow for vectorized operations
                 states = torch.stack(states)
@@ -197,12 +232,10 @@ class Policy_based_RL():
                     # Calculate loss of value function network
 
                     if self.method == "bootstrapping":
-                        value_function_loss_per_trace.append(torch.nn.MSELoss(value_estimate_per_state, self.value_function(states[:-1])) + self.eta_entropy*(torch.sum(-selected_policies*log_policies)))
+                        value_function_loss_per_trace.append(torch.mean(torch.square(value_estimate_per_state - self.value_function(states[:-1]).squeeze())) + self.eta_entropy*(torch.sum(-selected_policies*log_policies)))
                     
                     else:
                         value_function_loss_per_trace.append(torch.mean(torch.square(value_estimate_per_state)) + self.eta_entropy*(torch.sum(-selected_policies*log_policies)))
-
-            mean_reward_per_batch.append(np.mean(total_reward_per_trace))
 
             # Convert NumPy array to torch Tensors to update the policy's parameters
             policy_loss_per_trace = torch.stack(policy_loss_per_trace)
@@ -220,20 +253,27 @@ class Policy_based_RL():
                 mean_value_function_loss_per_batch.backward()
                 self.optimizer_value_function.step()
 
-            # print(f"Mean reward: {mean_reward_per_batch[-1]}, Loss: {torch.abs(mean_policy_loss_per_batch)}")
+            if time % int(eval_interval / (n_traces * self.trace_length)):
+                mean_reward = self.policy.evaluate(self.eval_env, n_eval_episodes = 5 * n_traces, max_episode_length = self.trace_length)
+                
+                eval_timesteps.append(time * n_traces * self.trace_length)
+                eval_mean_reward.append(mean_reward)
+
+        print(f"Number of env steps: {time * n_traces * self.trace_length}, Loss: {torch.abs(mean_policy_loss_per_batch)}")
 
             # Check for convergence
-            if  self.method == "reinforce" and torch.abs(mean_policy_loss_per_batch) < epsilon:
-                done = True
+            # if  self.method == "reinforce" and torch.abs(mean_policy_loss_per_batch) < epsilon:
+            #     done = True
 
-            elif self.method != "reinforce" and (torch.abs(mean_policy_loss_per_batch) and torch.abs(mean_value_function_loss_per_batch)) < epsilon:
-                done = True
+            # elif self.method != "reinforce" and (torch.abs(mean_policy_loss_per_batch) and torch.abs(mean_value_function_loss_per_batch)) < epsilon:
+            #     done = True
 
-        return mean_reward_per_batch   
+        return  eval_timesteps, eval_mean_reward
 
 if __name__ in "__main__":
     
-    mean_rewards_per_batch = [] # Averaging mean reward over many runs
+    mean_eval_timesteps = [] # Averaging mean environment steps over many runs
+    mean_eval_rewards = [] # Averaging mean reward over many runs
     lengths = []    # Length of each run
     
     # Averaging over 20 runs
@@ -241,22 +281,26 @@ if __name__ in "__main__":
     
         # Making the environment
         env = gym.make("Acrobot-v1")
-        policy_based_init = Policy_based_RL(env, method = "reinforce", trace_length = 500,
-                                         discount = 0.99, n_bootstrapping = 3,
-                                         learning_rate = 0.05, eta_entropy = 0.01, n_nodes = 32, n_hidden_layers = 1)
-        mean_reward_per_batch = np.array(policy_based_init.general_policy_based_algorithm(epsilon = 0.1, n_traces = 12))
-        mean_rewards_per_batch.append(mean_reward_per_batch)
-        lengths.append(len(mean_reward_per_batch))
+        eval_env = gym.make("Acrobot-v1")
+        policy_based_init = Policy_based_RL(env, eval_env, method = "bootstrapping", trace_length = 200,
+                                         discount = 0.99, n_bootstrapping = 3, learning_rate = 0.05, 
+                                         eta_entropy = 0.01, n_nodes = 32, n_hidden_layers = 1)
+        eval_timesteps, eval_mean_reward = np.array(policy_based_init.general_policy_based_algorithm(n_timesteps = 50001, 
+                                                                                                     n_traces = 5, 
+                                                                                                     eval_interval = 3000))
+        mean_eval_timesteps.append(eval_timesteps)
+        mean_eval_rewards.append(eval_mean_reward)
+
         env.close()
+        eval_env.close()
 
     # Taking the shortest length of all episodes because each episode is of different length
-    shortest_length = int(np.min(np.array(lengths, dtype = np.float32)))
-    mean_rewards_per_batch = np.array([mean_reward[:shortest_length] for mean_reward in mean_rewards_per_batch], dtype = np.float32)
-    mean_rewards_per_batch = np.mean(mean_rewards_per_batch, axis = 0)
-    plt.plot(np.arange(shortest_length), mean_rewards_per_batch)
-    plt.xlabel("Shortest length of episode")
-    plt.ylabel("Mean reward per episode averaged over 20 runs")
+    mean_eval_timesteps = np.mean(mean_eval_timesteps, axis = 0)
+    mean_eval_rewards = np.mean(mean_eval_rewards, axis = 0)
+
+    plt.plot(mean_eval_timesteps, mean_eval_rewards)
+    plt.xlabel("Number of environment steps")
+    plt.ylabel("Mean reward of evaluation environment")
     plt.show()
         
  
-
