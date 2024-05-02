@@ -48,7 +48,7 @@ class NeuralNetwork(nn.Module):
 class Policy(NeuralNetwork):
 
     def __init__(self, n_state, n_actions, n_nodes, n_hidden_layers):
-        super().__init__(n_state, n_actions, n_nodes, n_hidden_layers, last_layer = nn.Softmax())
+        super().__init__(n_state, n_actions, n_nodes, n_hidden_layers, last_layer = nn.Softmax(dim = -1))
 
     def select_action(self, state, exploration = "on"):
         """Selects action based on the policy.
@@ -191,9 +191,13 @@ class Policy_based_RL():
         return value_estimate_per_state
     
     def general_policy_based_algorithm(self, n_timesteps, n_traces, eval_interval):
-        """
-        epsilon: threshold for the convergence
+        """Train a policy using REINFORCE or Actor-Critic
+        n_timesteps: total amount of environment steps taken during training
         n_traces: amount of traces considered in one policy optimization
+        eval_interval: amount of environment steps after which the policy is evaluated
+            Return:
+        eval_timesteps: environment steps when the policy was evaluated
+        eval_mean_reward: average rewards of the policy on the evaluation environment
         """
         
         eval_timesteps = []
@@ -241,16 +245,22 @@ class Policy_based_RL():
             policy_loss_per_trace = torch.stack(policy_loss_per_trace)
             mean_policy_loss_per_batch = -torch.mean(policy_loss_per_trace)
 
-            self.optimizer_policy.zero_grad()
-            mean_policy_loss_per_batch.backward()
-            self.optimizer_policy.step()
+            if self.method == "reinforce":
+                self.optimizer_policy.zero_grad()
+                mean_policy_loss_per_batch.backward()
+                self.optimizer_policy.step()
 
-            if self.method != "reinforce":
+            else:
                 value_function_loss_per_trace = torch.stack(value_function_loss_per_trace)
                 mean_value_function_loss_per_batch = -torch.mean(value_function_loss_per_trace)
 
+                self.optimizer_policy.zero_grad()
                 self.optimizer_value_function.zero_grad()
-                mean_value_function_loss_per_batch.backward()
+
+                loss_per_batch = mean_policy_loss_per_batch + mean_value_function_loss_per_batch
+                loss_per_batch.backward()
+
+                self.optimizer_policy.step()
                 self.optimizer_value_function.step()
 
             if time % int(eval_interval / (n_traces * self.trace_length)):
@@ -285,7 +295,7 @@ if __name__ in "__main__":
         policy_based_init = Policy_based_RL(env, eval_env, method = "bootstrapping", trace_length = 200,
                                          discount = 0.99, n_bootstrapping = 3, learning_rate = 0.05, 
                                          eta_entropy = 0.01, n_nodes = 32, n_hidden_layers = 1)
-        eval_timesteps, eval_mean_reward = np.array(policy_based_init.general_policy_based_algorithm(n_timesteps = 50001, 
+        eval_timesteps, eval_mean_reward = np.array(policy_based_init.general_policy_based_algorithm(n_timesteps = 51000, 
                                                                                                      n_traces = 5, 
                                                                                                      eval_interval = 3000))
         mean_eval_timesteps.append(eval_timesteps)
