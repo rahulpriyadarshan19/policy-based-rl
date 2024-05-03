@@ -5,9 +5,12 @@ import torch
 from torch import nn
 import gymnasium as gym
 from tqdm import tqdm
+from scipy.signal import savgol_filter
 device = torch.device("cpu")
 
-# plt.rcParams["text.usetex"] = True
+# Pretty plots and a color-blind friendly color scheme
+plt.rcParams["text.usetex"] = True
+colors = {"blue":"#4477aa", "green":"#228833", "red":"#ee6677"}
 
 class NeuralNetwork(nn.Module):
     """
@@ -279,38 +282,108 @@ class Policy_based_RL():
             #     done = True
 
         return  eval_timesteps, eval_mean_reward
+    
+def averaged_runs(hyperparam, hyperparam_array, hyperparam_label, method = "reinforce"):
+    """Function to generate results averaging over 20 runs and for hyperparameter optimization.
+    hyperparam: Hyperparameter to be optimized (string)
+    hyperparam_array: Array of possible hyperparameters
+    method: Either reinforce, bootstrapping, baseline_subtraction or bootstrapping_baseline_subtraction
+    hyperparam_label: Label of hyperparameter, useful in plotting
+    """
+    fig, ax = plt.subplots(nrows = 1, ncols = 1)
+    color_strings = ["blue", "green", "red"]
+    
+    for value, color_string in zip(hyperparam_array, color_strings):
+        
+        mean_eval_timesteps = [] # Averaging mean environment steps over many runs
+        mean_eval_rewards = [] # Averaging mean reward over many runs
+        lengths = []    # Length of each run
+        print(f"{hyperparam} = {value}: ")
+        
+        for i in tqdm(range(20)):
+            
+            # Making the environment
+            env = gym.make("Acrobot-v1")
+            eval_env = gym.make("Acrobot-v1")
+        
+            # Defining the policy based RL class based on which hyperparameter needs to be tuned
+            if hyperparam == "learning_rate":
+                policy_based_init = Policy_based_RL(
+                    env, eval_env, method = "reinforce", trace_length = 200,
+                    discount = 0.99, n_bootstrapping = 3, learning_rate = value, 
+                    eta_entropy = 0.01, n_nodes = 32, n_hidden_layers = 1)
+                
+            elif hyperparam == "n_nodes":
+                policy_based_init = Policy_based_RL(
+                    env, eval_env, method = "reinforce", trace_length = 200,
+                    discount = 0.99, n_bootstrapping = 3, learning_rate = 0.05, 
+                    eta_entropy = 0.01, n_nodes = value, n_hidden_layers = 1)
+                
+            elif hyperparam == "n_hidden_layers":
+                policy_based_init = Policy_based_RL(
+                    env, eval_env, method = "reinforce", trace_length = 200,
+                    discount = 0.99, n_bootstrapping = 3, learning_rate = 0.05, 
+                    eta_entropy = 0.01, n_nodes = 64, n_hidden_layers = value)
+                
+            elif hyperparam == "n_bootstrapping":
+                policy_based_init = Policy_based_RL(
+                    env, eval_env, method = "bootstrapping", trace_length = 200,
+                    discount = 0.99, n_bootstrapping = value, learning_rate = 0.05, 
+                    eta_entropy = 0.01, n_nodes = 64, n_hidden_layers = 1)
+                
+            elif hyperparam == "eta_entropy":
+                policy_based_init = Policy_based_RL(
+                    env, eval_env, method = "reinforce", trace_length = 200,
+                    discount = 0.99, n_bootstrapping = 3, learning_rate = 0.05, 
+                    eta_entropy = value, n_nodes = 64, n_hidden_layers = 1)
+                
+            # Training the policy-based algorithm and evaluating it on an environment
+            eval_timesteps, eval_mean_reward = np.array(policy_based_init.general_policy_based_algorithm
+                                                        (n_timesteps = 51000, 
+                                                         n_traces = 5, 
+                                                         eval_interval = 3000))
+            
+            mean_eval_timesteps.append(eval_timesteps)
+            mean_eval_rewards.append(eval_mean_reward)
 
+            env.close()
+            eval_env.close()
+            
+        # Taking the shortest length of all episodes because each episode is of different length
+        mean_eval_timesteps = np.mean(mean_eval_timesteps, axis = 0)
+        mean_eval_rewards = np.mean(mean_eval_rewards, axis = 0)
+        
+        # Smoothing the rewards
+        mean_eval_rewards = savgol_filter(mean_eval_rewards, window_length = 9,
+                                          polyorder = 2)
+        
+        # Plotting learning curves
+        ax.grid()
+        ax.plot(mean_eval_timesteps, mean_eval_rewards, label = f"{hyperparam_label} = {value}",
+                color = colors[color_string])
+        
+    ax.set_xlabel("Number of environment steps")
+    ax.set_ylabel("Mean reward of evaluation environment")
+    ax.set_title(f"Tuning {hyperparam}")
+    ax.legend()
+    fig.savefig(f"learning_curve_{method}_{hyperparam}.png", dpi = 300)
+            
+    
 if __name__ in "__main__":
     
-    mean_eval_timesteps = [] # Averaging mean environment steps over many runs
-    mean_eval_rewards = [] # Averaging mean reward over many runs
-    lengths = []    # Length of each run
-    
-    # Averaging over 20 runs
-    for i in tqdm(range(20)):
-    
-        # Making the environment
-        env = gym.make("Acrobot-v1")
-        eval_env = gym.make("Acrobot-v1")
-        policy_based_init = Policy_based_RL(env, eval_env, method = "bootstrapping", trace_length = 200,
-                                         discount = 0.99, n_bootstrapping = 3, learning_rate = 0.05, 
-                                         eta_entropy = 0.01, n_nodes = 32, n_hidden_layers = 1)
-        eval_timesteps, eval_mean_reward = np.array(policy_based_init.general_policy_based_algorithm(n_timesteps = 51000, 
-                                                                                                     n_traces = 5, 
-                                                                                                     eval_interval = 3000))
-        mean_eval_timesteps.append(eval_timesteps)
-        mean_eval_rewards.append(eval_mean_reward)
-
-        env.close()
-        eval_env.close()
-
-    # Taking the shortest length of all episodes because each episode is of different length
-    mean_eval_timesteps = np.mean(mean_eval_timesteps, axis = 0)
-    mean_eval_rewards = np.mean(mean_eval_rewards, axis = 0)
-
-    plt.plot(mean_eval_timesteps, mean_eval_rewards)
-    plt.xlabel("Number of environment steps")
-    plt.ylabel("Mean reward of evaluation environment")
-    plt.show()
+    hyperparam_dict = {
+        "learning_rate": [np.array([5e-3, 1e-2, 5e-2], dtype = np.float32), r"$\alpha$"],
+        "n_nodes": [np.array([32, 64, 128], dtype = int), "Nodes"],
+        "n_hidden_layers": [np.array([1, 2, 3], dtype = int), "HiddenLayers"],
+        "n_bootstrapping": [np.array([1, 3, 5], dtype = int), "n-step"],
+        "eta_entropy": [np.array([0.003, 0.01, 0.03], dtype = np.float32), r"$\eta$"]
+    }
+    print(list(hyperparam_dict.keys()))
+    for hyperparam in list(hyperparam_dict.keys())[4:5]:
+        averaged_runs(hyperparam, 
+                      hyperparam_array = hyperparam_dict[hyperparam][0], 
+                      hyperparam_label = hyperparam_dict[hyperparam][1], 
+                      method = "reinforce")
+        
         
  
