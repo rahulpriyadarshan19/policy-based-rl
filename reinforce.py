@@ -415,6 +415,7 @@ def averaged_runs(hyperparam, hyperparam_array, hyperparam_label, method = "rein
     
 if __name__ in "__main__":
     
+    # Dictionary of hyperparameters
     hyperparam_dict = {
         "learning_rate": [np.array([5e-3, 1e-2, 5e-2], dtype = np.float32), r"$\alpha$"],
         "n_nodes": [np.array([32, 64, 128], dtype = int), "Nodes"],
