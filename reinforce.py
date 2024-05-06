@@ -10,7 +10,7 @@ device = torch.device("cpu")
 
 # Pretty plots and a color-blind friendly color scheme
 plt.rcParams["text.usetex"] = True
-colors = {"blue":"#4477aa", "green":"#228833", "red":"#ee6677"}
+colors = {"blue":"#4477aa", "green":"#228833", "red":"#ee6677", "cyan":"#66ccee"}
 
 class NeuralNetwork(nn.Module):
     """
@@ -178,9 +178,9 @@ class Policy_based_RL():
                 value_estimate_per_state[k] = value_estimate
 
             if self.method == "baseline_subtraction":
-                value_estimate_per_state = value_estimate_per_state - self.value_function(states[:-1]).squeeze()
+                value_estimate_per_state = torch.Tensor(value_estimate_per_state) - self.value_function(states[:-1]).squeeze()
 
-        elif self.method == "bootstrapping" or self.method == "bootstrapping_basline_subtraction":
+        elif self.method == "bootstrapping" or self.method == "bootstrapping_baseline_subtraction":
             for k in range(T - 1):
 
                 discount_n = np.full(self.n_bootstrapping, self.discount) ** np.arange(self.n_bootstrapping)
@@ -188,7 +188,7 @@ class Policy_based_RL():
                                 + (self.discount ** self.n_bootstrapping) * self.value_function(states[k + self.n_bootstrapping]).squeeze()
                 value_estimate_per_state[k] = value_estimate
 
-            if self.method == "bootstrapping_basline_subtraction":
+            if self.method == "bootstrapping_baseline_subtraction":
                 value_estimate_per_state = value_estimate_per_state - self.value_function(states[:-1]).squeeze()
 
         return value_estimate_per_state
@@ -284,18 +284,20 @@ class Policy_based_RL():
 
         return  eval_timesteps, eval_mean_reward
     
-def averaged_runs(hyperparam, hyperparam_array, hyperparam_label, method = "reinforce",
-                  best = False):
+def averaged_runs(hyperparam = None, hyperparam_array = None, hyperparam_label = None, 
+                  method = "reinforce", best = False, variance = False):
     """Function to generate results averaging over 20 runs and for hyperparameter optimization.
     hyperparam: Hyperparameter to be optimized (string)
     hyperparam_array: Array of possible hyperparameters
     method: Either reinforce, bootstrapping, baseline_subtraction or bootstrapping_baseline_subtraction
     hyperparam_label: Label of hyperparameter, useful in plotting
+    best: False does tuning, true plots results for best hyperparameters
+    variance: if True, plots results comparing variance of different methods
     """
     fig, ax = plt.subplots(nrows = 1, ncols = 1)
     color_strings = ["blue", "green", "red"]
     
-    if not best:
+    if not best and not variance:
         for value, color_string in zip(hyperparam_array, color_strings):
             
             mean_eval_timesteps = [] # Averaging mean environment steps over many runs
@@ -411,6 +413,63 @@ def averaged_runs(hyperparam, hyperparam_array, hyperparam_label, method = "rein
         ax.set_ylabel("Mean reward of evaluation environment")
         ax.set_title(f"Performance of {method}")
         fig.savefig(f"performance_{method}.png", dpi = 300)
+        
+    elif variance:
+        
+        methods = ["reinforce", "bootstrapping", "baseline_subtraction", 
+                   "bootstrapping_baseline_subtraction"]
+        color_strings = ["blue", "green", "red", "cyan"]
+        fig, ax = plt.subplots(nrows = 1, ncols = 1)
+        
+        for method_, color_string in zip(methods, color_strings):
+            print(method_)
+            mean_eval_timesteps = [] # Averaging mean environment steps over many runs
+            var_eval_rewards = [] # Computing variance of reward over many runs
+            
+            for i in tqdm(range(3)):
+                # Making the environment
+                env = gym.make("Acrobot-v1")
+                eval_env = gym.make("Acrobot-v1")
+                
+                policy_based_init = Policy_based_RL(
+                    env, eval_env, method = method_, trace_length = 200,
+                    discount = 0.99, n_bootstrapping = 3, learning_rate = 0.005, 
+                    eta_entropy = 0.03, n_nodes = 32, n_hidden_layers = 1)
+                
+                # Training the policy-based algorithm and evaluating it on an environment
+                eval_timesteps, eval_var_reward = np.array(policy_based_init.general_policy_based_algorithm
+                                                            (n_timesteps = 503000, 
+                                                            n_traces = 5, 
+                                                            eval_interval = 3000))
+                
+                mean_eval_timesteps.append(eval_timesteps)
+                var_eval_rewards.append(eval_var_reward)
+
+                env.close()
+                eval_env.close()
+                
+            # Taking the shortest length of all episodes because each episode is of different length
+            mean_eval_timesteps = np.mean(mean_eval_timesteps, axis = 0)
+            var_eval_rewards = np.var(var_eval_rewards, axis = 0)
+            
+            if method == "reinforce":
+                np.save("mean_eval_timesteps.npy", mean_eval_timesteps)
+            np.save(f"var_eval_rewards_{method}.npy", var_eval_rewards)
+            
+            # Smoothing the rewards
+            var_eval_rewards = savgol_filter(var_eval_rewards, window_length = 5,
+                                             polyorder = 2)
+            
+            # Comparing the variance of different runs
+            ax.grid()
+            ax.plot(mean_eval_timesteps, var_eval_rewards, label = f"{method_}",
+                    color = colors[color_string])
+            ax.set_xlabel("Number of environment steps")
+            ax.set_ylabel("Variance of reward of evaluation environment")
+            ax.set_title("Variance of different methods")
+            ax.legend()
+            fig.savefig(f"variance_{method}.png", dpi = 300)
+        
             
     
 if __name__ in "__main__":
@@ -431,11 +490,11 @@ if __name__ in "__main__":
     #                   method = "reinforce")
         
     # Getting the best runs of bootstrapping and bootstrapping_baseline_subtraction
-    hyperparam = list(hyperparam_dict.keys())[0]
-    averaged_runs(hyperparam, hyperparam_dict[hyperparam][0], hyperparam_dict[hyperparam][1],
-                  method = "bootstrapping", best = True)
-    averaged_runs(hyperparam, hyperparam_dict[hyperparam][0], hyperparam_dict[hyperparam][1],
-                  method = "bootstrapping_baseline_subtraction", best = True)
+    # averaged_runs(method = "bootstrapping", best = True)
+    # averaged_runs(method = "bootstrapping_baseline_subtraction", best = True)
+    
+    # Comparing variance of different methods
+    averaged_runs(variance = True)
     
     
         
